@@ -63,3 +63,4 @@ Waste Management System Model Pipeline -
 - **Ambiguous Object Identification:** Addressing instances where the system misidentifies certain materials, such as confusing plastic with glass.
 - **Image Capturing through Camera Issues:** Overcoming challenges in capturing objects through the user’s camera and classifying the waste category.
 - **Computational Expense in Training:** Dealing with the computational intensity and time-consuming nature of the training process.
+# Garbage
