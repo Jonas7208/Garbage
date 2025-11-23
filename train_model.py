@@ -1,93 +1,91 @@
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import InceptionV3
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
 from tensorflow.keras.models import Model
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, TensorBoard
 from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.regularizers import l2
 import numpy as np
 from datetime import datetime
+from pathlib import Path
 import os
 
 print("=" * 60)
-print("🚀 Garbage Classification Model - Verbessertes Training")
+print("🚀 Garbage Classification Model - Training")
 print("=" * 60)
 
-# Konfiguration
+# ============================================================
+# KONFIGURATION
+# ============================================================
 IMG_SIZE = (299, 299)
 BATCH_SIZE = 32
 INITIAL_EPOCHS = 20
 FINE_TUNE_EPOCHS = 10
 LEARNING_RATE = 0.0001
-
-# ============================================================
-# WICHTIG: Passe diesen Pfad an!
-# ============================================================
-# Basierend auf deiner Ordnerstruktur:
-TRAIN_DIR = 'dataset/train'  # Angepasst an deine Struktur
-
-# Falls die Klassen direkt in dataset/ liegen:
-# TRAIN_DIR = 'dataset'
-
-# Absoluter Pfad (Alternative):
-# TRAIN_DIR = '/Users/jonasgasparini/PycharmProjects/garbage-classification-model/dataset/train'
-
-# Prüfe ob Verzeichnis existiert
-if not os.path.exists(TRAIN_DIR):
-    print(f"\n❌ FEHLER: Verzeichnis '{TRAIN_DIR}' nicht gefunden!")
-    print("\n🔍 Suche nach möglichen Verzeichnissen...")
-
-    # Suche nach dataset-Verzeichnissen
-    current_dir = os.getcwd()
-    print(f"   Aktuelles Verzeichnis: {current_dir}")
-
-    possible_paths = [
-        'dataset-resized',
-        'dataset-resized/train',
-        'dataset',
-        'data/train',
-        '../dataset-resized'
-    ]
-
-    print("\n   Prüfe folgende Pfade:")
-    for path in possible_paths:
-        exists = "✅" if os.path.exists(path) else "❌"
-        print(f"   {exists} {path}")
-
-    print("\n💡 Lösung: Passe TRAIN_DIR im Code an (Zeile 19-27)")
-    exit(1)
-
-print(f"✅ Verzeichnis gefunden: {TRAIN_DIR}")
-
+TRAIN_DIR = 'dataset/train'
 NUM_CLASSES = 6
 
-# GPU-Check
-print(f"\n🎮 GPU gefunden: {len(tf.config.list_physical_devices('GPU'))} Gerät(e)")
+# ============================================================
+# GPU Setup
+# ============================================================
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print(f"✅ GPU gefunden: {len(gpus)} Gerät(e)")
+    except RuntimeError as e:
+        print(f"⚠️ GPU Setup Fehler: {e}")
+else:
+    print("⚠️ Keine GPU gefunden - Training auf CPU")
 
 # ============================================================
-# 1. Data Augmentation und Generatoren
+# Dataset Verzeichnis prüfen
 # ============================================================
-print("\n📊 Erstelle Daten-Generatoren mit Validation Split...")
+if not os.path.exists(TRAIN_DIR):
+    print(f"\n❌ FEHLER: '{TRAIN_DIR}' nicht gefunden!")
+    print("\n💡 Alternative Pfade:")
+    alternatives = ['dataset-resized/train', 'dataset', 'data/train']
+    for path in alternatives:
+        if os.path.exists(path):
+            print(f"   ✅ {path} gefunden!")
+            TRAIN_DIR = path
+            break
+        else:
+            print(f"   ❌ {path}")
+
+    if not os.path.exists(TRAIN_DIR):
+        print("\n💡 Passe TRAIN_DIR im Code an!")
+        exit(1)
+
+print(f"✅ Dataset: {TRAIN_DIR}")
+os.makedirs('models', exist_ok=True)
+os.makedirs('logs/fit', exist_ok=True)
+
+# ============================================================
+# Daten-Generatoren
+# ============================================================
+print("\n📊 Erstelle Daten-Generatoren...")
 
 train_datagen = ImageDataGenerator(
-    rescale=1./255,
-    validation_split=0.2,  # 20% für Validation
-    rotation_range=20,
+    rescale=1. / 255,
+    validation_split=0.2,
+    rotation_range=30,
     width_shift_range=0.2,
     height_shift_range=0.2,
     shear_range=0.2,
     zoom_range=0.2,
     horizontal_flip=True,
+    brightness_range=[0.8, 1.2],
     fill_mode='nearest'
 )
 
-# Nur Rescaling für Validation (keine Augmentation)
 val_datagen = ImageDataGenerator(
-    rescale=1./255,
+    rescale=1. / 255,
     validation_split=0.2
 )
 
-# Training Generator
 train_generator = train_datagen.flow_from_directory(
     TRAIN_DIR,
     target_size=IMG_SIZE,
@@ -97,7 +95,6 @@ train_generator = train_datagen.flow_from_directory(
     shuffle=True
 )
 
-# Validation Generator
 validation_generator = val_datagen.flow_from_directory(
     TRAIN_DIR,
     target_size=IMG_SIZE,
@@ -107,56 +104,65 @@ validation_generator = val_datagen.flow_from_directory(
     shuffle=False
 )
 
-print(f"\n✅ Trainingssamples: {train_generator.samples}")
-print(f"✅ Validierungssamples: {validation_generator.samples}")
-print(f"✅ Klassen: {train_generator.class_indices}")
+print(f"✅ Training: {train_generator.samples} Bilder")
+print(f"✅ Validation: {validation_generator.samples} Bilder")
+print(f"✅ Klassen: {list(train_generator.class_indices.keys())}")
+
+# Passe NUM_CLASSES automatisch an
+NUM_CLASSES = len(train_generator.class_indices)
 
 # ============================================================
-# 2. Class Weights berechnen (für unbalancierte Daten)
+# Class Weights
 # ============================================================
-print("\n⚖️ Berechne Class Weights für unbalancierte Klassen...")
+print("\n⚖️ Berechne Class Weights...")
 
 class_counts = np.zeros(NUM_CLASSES)
 for class_name, class_idx in train_generator.class_indices.items():
     class_dir = os.path.join(TRAIN_DIR, class_name)
-    class_counts[class_idx] = len(os.listdir(class_dir))
+    if os.path.exists(class_dir):
+        files = [f for f in os.listdir(class_dir)
+                 if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        class_counts[class_idx] = len(files)
 
-total_samples = class_counts.sum()
-class_weights = {i: total_samples / (NUM_CLASSES * count)
+total = class_counts.sum()
+class_weights = {i: total / (NUM_CLASSES * count) if count > 0 else 1.0
                  for i, count in enumerate(class_counts)}
 
 print("Class Weights:")
-for class_name, class_idx in train_generator.class_indices.items():
-    print(f"   {class_name}: {class_weights[class_idx]:.2f}")
+for name, idx in sorted(train_generator.class_indices.items(), key=lambda x: x[1]):
+    print(f"   {name}: {int(class_counts[idx])} Bilder (Weight: {class_weights[idx]:.2f})")
 
 # ============================================================
-# 3. Modell erstellen
+# Modell erstellen
 # ============================================================
-print("\n📦 Erstelle Modell-Architektur...")
+print("\n📦 Erstelle Modell...")
 
-# Base Model (InceptionV3)
+# Base Model
 base_model = InceptionV3(
     weights='imagenet',
     include_top=False,
     input_shape=(*IMG_SIZE, 3)
 )
-
-# Friere Base Model zunächst ein
 base_model.trainable = False
 
 # Custom Top Layers
+# L2 reduziert da BatchNorm verwendet wird (siehe Paper: Faktor 5 reduzieren)
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
-x = Dense(1024, activation='relu', name='fc1')(x)
+x = Dense(1024, activation='relu', kernel_regularizer=l2(0.002))(x)
+x = BatchNormalization()(x)
 x = Dropout(0.5)(x)
-x = Dense(512, activation='relu', name='fc2')(x)
+x = Dense(512, activation='relu', kernel_regularizer=l2(0.002))(x)
+x = BatchNormalization()(x)
 x = Dropout(0.5)(x)
-predictions = Dense(NUM_CLASSES, activation='softmax', name='predictions')(x)
+predictions = Dense(NUM_CLASSES, activation='softmax', dtype='float32')(x)
 
 model = Model(inputs=base_model.input, outputs=predictions)
 
+print(f"✅ Modell erstellt: {model.count_params():,} Parameter")
+
 # ============================================================
-# 4. Callbacks
+# Callbacks
 # ============================================================
 print("\n⚙️ Konfiguriere Callbacks...")
 
@@ -164,7 +170,6 @@ timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 log_dir = f"logs/fit/{timestamp}"
 
 callbacks = [
-    # Speichert das beste Modell
     ModelCheckpoint(
         'models/best_model.keras',
         monitor='val_accuracy',
@@ -172,16 +177,12 @@ callbacks = [
         mode='max',
         verbose=1
     ),
-
-    # Stoppt Training bei Stagnation
     EarlyStopping(
         monitor='val_loss',
-        patience=5,
+        patience=7,
         restore_best_weights=True,
         verbose=1
     ),
-
-    # Reduziert Learning Rate bei Plateau
     ReduceLROnPlateau(
         monitor='val_loss',
         factor=0.5,
@@ -189,36 +190,27 @@ callbacks = [
         min_lr=1e-7,
         verbose=1
     ),
-
-    # TensorBoard für Visualisierung
-    TensorBoard(
-        log_dir=log_dir,
-        histogram_freq=1
-    )
+    TensorBoard(log_dir=log_dir, histogram_freq=1)
 ]
 
-# Erstelle models Ordner falls nicht vorhanden
-os.makedirs('models', exist_ok=True)
-
 # ============================================================
-# 5. Kompiliere und trainiere Modell
+# PHASE 1: Initial Training
 # ============================================================
-print("\n⚙️ Kompiliere Modell...")
+print("\n" + "=" * 60)
+print("🏋️ PHASE 1: Training mit gefrorenem Base Model")
+print("=" * 60)
 
 model.compile(
     optimizer=Adam(learning_rate=LEARNING_RATE),
     loss='categorical_crossentropy',
-    metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=2, name='top_2_accuracy')]
+    metrics=['accuracy',
+             tf.keras.metrics.TopKCategoricalAccuracy(k=2, name='top_2_accuracy')]
 )
 
-# Model Summary
-print("\n📋 Modell-Zusammenfassung:")
-model.summary()
+print(f"Epochen: {INITIAL_EPOCHS}")
+print(f"Learning Rate: {LEARNING_RATE}")
 
-print(f"\n🏋️ Phase 1: Training mit gefrorenem Base Model ({INITIAL_EPOCHS} Epochen)...")
-print("=" * 60)
-
-history = model.fit(
+history1 = model.fit(
     train_generator,
     epochs=INITIAL_EPOCHS,
     validation_data=validation_generator,
@@ -228,31 +220,38 @@ history = model.fit(
 )
 
 # ============================================================
-# 6. Fine-Tuning (optional)
+# PHASE 2: Fine-Tuning
 # ============================================================
-print("\n\n🔥 Phase 2: Fine-Tuning - Entfriere obere Layers...")
-
-# Entfriere die oberen Layers des Base Models
-base_model.trainable = True
-
-# Friere nur die unteren Layers ein
-for layer in base_model.layers[:249]:  # InceptionV3 hat 311 Layers
-    layer.trainable = False
-
-# Neu kompilieren mit niedriger Learning Rate
-model.compile(
-    optimizer=Adam(learning_rate=LEARNING_RATE/10),
-    loss='categorical_crossentropy',
-    metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=2, name='top_2_accuracy')]
-)
-
-print(f"🏋️ Starte Fine-Tuning für {FINE_TUNE_EPOCHS} Epochen...")
+print("\n" + "=" * 60)
+print("🔥 PHASE 2: Fine-Tuning")
 print("=" * 60)
 
-history_fine = model.fit(
+# Entfrier obere Layers
+base_model.trainable = True
+for layer in base_model.layers[:249]:
+    layer.trainable = False
+
+trainable = len([l for l in base_model.layers if l.trainable])
+print(f"Trainierbare Layers: {trainable}/{len(base_model.layers)}")
+
+# Neu kompilieren mit niedriger LR
+fine_tune_lr = LEARNING_RATE / 10
+model.compile(
+    optimizer=Adam(learning_rate=fine_tune_lr),
+    loss='categorical_crossentropy',
+    metrics=['accuracy',
+             tf.keras.metrics.TopKCategoricalAccuracy(k=2, name='top_2_accuracy')]
+)
+
+print(f"Learning Rate: {fine_tune_lr}")
+
+initial_epoch = len(history1.history['loss'])
+total_epochs = initial_epoch + FINE_TUNE_EPOCHS
+
+history2 = model.fit(
     train_generator,
-    epochs=INITIAL_EPOCHS + FINE_TUNE_EPOCHS,
-    initial_epoch=history.epoch[-1] + 1,
+    epochs=total_epochs,
+    initial_epoch=initial_epoch,
     validation_data=validation_generator,
     callbacks=callbacks,
     class_weight=class_weights,
@@ -260,28 +259,27 @@ history_fine = model.fit(
 )
 
 # ============================================================
-# 7. Finale Evaluierung
+# Finale Evaluierung
 # ============================================================
-print("\n\n📊 Finale Evaluierung...")
+print("\n" + "=" * 60)
+print("📊 FINALE EVALUIERUNG")
 print("=" * 60)
 
-# Lade bestes Modell
 best_model = tf.keras.models.load_model('models/best_model.keras')
-
-# Evaluiere auf Validation Set
 results = best_model.evaluate(validation_generator, verbose=1)
 
-print("\n✅ Finale Metriken:")
-print(f"   Loss: {results[0]:.4f}")
-print(f"   Accuracy: {results[1]:.4f}")
-print(f"   Top-2 Accuracy: {results[2]:.4f}")
+print("\n✅ FINALE METRIKEN:")
+print(f"   Loss:           {results[0]:.4f}")
+print(f"   Accuracy:       {results[1]:.4f} ({results[1] * 100:.2f}%)")
+print(f"   Top-2 Accuracy: {results[2]:.4f} ({results[2] * 100:.2f}%)")
 
 # Speichere finales Modell
-print("\n💾 Speichere finales Modell...")
 model.save('models/final_model.keras')
-print("   ✅ Gespeichert als: models/final_model.keras")
+print("\n💾 Modelle gespeichert:")
+print("   ✅ models/best_model.keras")
+print("   ✅ models/final_model.keras")
 
 print("\n🎉 Training abgeschlossen!")
 print("=" * 60)
-print(f"\n📊 TensorBoard starten mit: tensorboard --logdir={log_dir}")
+print(f"\n📊 TensorBoard: tensorboard --logdir={log_dir}")
 print("=" * 60)

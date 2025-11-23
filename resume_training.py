@@ -3,218 +3,428 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, TensorBoard
 from tensorflow.keras.optimizers import Adam
 import numpy as np
+import matplotlib.pyplot as plt
 from datetime import datetime
-import os
+from pathlib import Path
+import json
+import sys
 
-print("=" * 60)
-print("🔄 Garbage Classification Model - Weitertrainieren")
-print("=" * 60)
 
-# Konfiguration
-IMG_SIZE = (299, 299)
-BATCH_SIZE = 32
-ADDITIONAL_EPOCHS = 10  # Wie viele Epochen ZUSÄTZLICH trainieren?
-LEARNING_RATE = 0.00005  # Niedrigere LR für Fine-Tuning
-TRAIN_DIR = 'dataset/train'
-NUM_CLASSES = 6
+class Config:
+    """Zentrale Konfiguration"""
+    IMG_SIZE = (299, 299)
+    BATCH_SIZE = 32
+    ADDITIONAL_EPOCHS = 10
+    LEARNING_RATE = 0.00005
+    TRAIN_DIR = 'dataset/train'
+    NUM_CLASSES = 6
+    MODEL_PATH = 'models/best_model.keras'
 
-# GPU-Check
-print(f"\n🎮 GPU gefunden: {len(tf.config.list_physical_devices('GPU'))} Gerät(e)")
+    # Neue Modellpfade
+    RESUMED_BEST = 'models/resumed_best_model.keras'
+    FINAL_RESUMED = 'models/final_resumed_model.keras'
 
-# ============================================================
-# 1. Lade bestehendes Modell
-# ============================================================
-print("\n📦 Lade bestehendes Modell...")
+    # Fine-Tuning Einstellungen
+    UNFREEZE_FROM_LAYER = 200
+    AUTO_UNFREEZE = False  # Automatisch entfrieren ohne Nachfrage
 
-MODEL_PATH = 'models/best_model.keras'  # Oder 'models/final_model.keras'
 
-try:
-    model = tf.keras.models.load_model(MODEL_PATH)
-    print(f"✅ Modell geladen von: {MODEL_PATH}")
+def setup_gpu():
+    """Konfiguriere GPU für optimale Performance"""
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"🎮 GPU gefunden: {len(gpus)} Gerät(e)")
+            return True
+        except RuntimeError as e:
+            print(f"⚠️ GPU-Konfiguration fehlgeschlagen: {e}")
+    else:
+        print("⚠️ Keine GPU gefunden - Training läuft auf CPU")
+    return False
 
-    # Zeige aktuelle Metriken
-    print("\n📊 Modell-Info:")
-    print(f"   Total Parameters: {model.count_params():,}")
-    trainable_params = sum([tf.size(w).numpy() for w in model.trainable_weights])
-    print(f"   Trainable Parameters: {trainable_params:,}")
 
-except Exception as e:
-    print(f"❌ Fehler beim Laden: {e}")
-    print("💡 Stelle sicher, dass das Modell existiert!")
-    exit(1)
+def validate_directories(config):
+    """Überprüfe ob alle benötigten Verzeichnisse existieren"""
+    train_path = Path(config.TRAIN_DIR)
+    model_path = Path(config.MODEL_PATH)
 
-# ============================================================
-# 2. Bereite Daten vor (gleich wie beim ersten Training)
-# ============================================================
-print("\n📊 Bereite Daten vor...")
+    if not train_path.exists():
+        raise FileNotFoundError(f"❌ Trainingsverzeichnis nicht gefunden: {train_path}")
 
-train_datagen = ImageDataGenerator(
-    rescale=1. / 255,
-    validation_split=0.2,
-    rotation_range=20,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.2,
-    zoom_range=0.2,
-    horizontal_flip=True,
-    fill_mode='nearest'
-)
+    if not model_path.exists():
+        raise FileNotFoundError(f"❌ Modell nicht gefunden: {model_path}")
 
-val_datagen = ImageDataGenerator(
-    rescale=1. / 255,
-    validation_split=0.2
-)
+    # Erstelle Ausgabeverzeichnisse falls nicht vorhanden
+    Path('models').mkdir(exist_ok=True)
+    Path('logs/fit').mkdir(parents=True, exist_ok=True)
 
-train_generator = train_datagen.flow_from_directory(
-    TRAIN_DIR,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    class_mode='categorical',
-    subset='training',
-    shuffle=True
-)
+    print("✅ Alle Verzeichnisse validiert")
 
-validation_generator = val_datagen.flow_from_directory(
-    TRAIN_DIR,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    class_mode='categorical',
-    subset='validation',
-    shuffle=False
-)
 
-print(f"✅ Trainingssamples: {train_generator.samples}")
-print(f"✅ Validierungssamples: {validation_generator.samples}")
+def load_model(model_path):
+    """Lade Modell mit Fehlerbehandlung"""
+    try:
+        model = tf.keras.models.load_model(model_path)
+        print(f"✅ Modell geladen von: {model_path}")
 
-# ============================================================
-# 3. Class Weights
-# ============================================================
-print("\n⚖️ Berechne Class Weights...")
+        # Zeige Modell-Informationen
+        print("\n📊 Modell-Info:")
+        print(f"   Total Parameters: {model.count_params():,}")
 
-class_counts = np.zeros(NUM_CLASSES)
-for class_name, class_idx in train_generator.class_indices.items():
-    class_dir = os.path.join(TRAIN_DIR, class_name)
-    class_counts[class_idx] = len(os.listdir(class_dir))
+        # Korrekte Methode für trainierbare Parameter
+        trainable_count = sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])
+        print(f"   Trainable Parameters: {trainable_count:,}")
 
-total_samples = class_counts.sum()
-class_weights = {i: total_samples / (NUM_CLASSES * count)
-                 for i, count in enumerate(class_counts)}
+        return model
+    except Exception as e:
+        raise RuntimeError(f"❌ Fehler beim Laden des Modells: {e}")
 
-# ============================================================
-# 4. Optional: Entfiere mehr Layers für Fine-Tuning
-# ============================================================
-print("\n🔓 Optional: Entfiere weitere Layers für besseres Fine-Tuning...")
 
-user_choice = input("Möchtest du mehr Layers trainieren? (j/n): ").lower()
+def create_data_generators(config):
+    """Erstelle Daten-Generatoren mit Fehlerbehandlung"""
+    print("\n📊 Bereite Daten vor...")
 
-if user_choice == 'j':
-    # Finde Base Model (InceptionV3)
+    train_datagen = ImageDataGenerator(
+        rescale=1. / 255,
+        validation_split=0.2,
+        rotation_range=20,
+        width_shift_range=0.2,
+        height_shift_range=0.2,
+        shear_range=0.2,
+        zoom_range=0.2,
+        horizontal_flip=True,
+        fill_mode='nearest'
+    )
+
+    val_datagen = ImageDataGenerator(
+        rescale=1. / 255,
+        validation_split=0.2
+    )
+
+    try:
+        train_generator = train_datagen.flow_from_directory(
+            config.TRAIN_DIR,
+            target_size=config.IMG_SIZE,
+            batch_size=config.BATCH_SIZE,
+            class_mode='categorical',
+            subset='training',
+            shuffle=True
+        )
+
+        validation_generator = val_datagen.flow_from_directory(
+            config.TRAIN_DIR,
+            target_size=config.IMG_SIZE,
+            batch_size=config.BATCH_SIZE,
+            class_mode='categorical',
+            subset='validation',
+            shuffle=False
+        )
+
+        print(f"✅ Trainingssamples: {train_generator.samples}")
+        print(f"✅ Validierungssamples: {validation_generator.samples}")
+        print(f"✅ Klassen: {list(train_generator.class_indices.keys())}")
+
+        return train_generator, validation_generator
+
+    except Exception as e:
+        raise RuntimeError(f"❌ Fehler beim Erstellen der Generatoren: {e}")
+
+
+def calculate_class_weights(train_generator, config):
+    """Berechne Class Weights für unbalancierte Daten"""
+    print("\n⚖️ Berechne Class Weights...")
+
+    class_counts = np.zeros(config.NUM_CLASSES)
+    for class_name, class_idx in train_generator.class_indices.items():
+        class_dir = Path(config.TRAIN_DIR) / class_name
+        class_counts[class_idx] = len(list(class_dir.iterdir()))
+
+    total_samples = class_counts.sum()
+    class_weights = {
+        i: total_samples / (config.NUM_CLASSES * count)
+        for i, count in enumerate(class_counts)
+    }
+
+    # Zeige Class Distribution
+    print("\n📊 Klassenverteilung:")
+    for class_name, class_idx in train_generator.class_indices.items():
+        print(f"   {class_name}: {int(class_counts[class_idx])} Bilder (Weight: {class_weights[class_idx]:.2f})")
+
+    return class_weights
+
+
+def unfreeze_layers(model, config):
+    """Entfiere mehr Layers für besseres Fine-Tuning"""
+    print("\n🔓 Fine-Tuning Konfiguration...")
+
+    # Automatische oder manuelle Entscheidung
+    if not config.AUTO_UNFREEZE:
+        user_input = input("Möchtest du mehr Layers trainieren? (j/n) [Standard: n]: ").lower()
+        if user_input not in ['j', 'ja', 'y', 'yes']:
+            print("⏭️ Überspringe Layer-Entfrierung")
+            return
+
+    # Finde Base Model (InceptionV3 oder ähnlich)
+    base_model_found = False
     for layer in model.layers:
-        if hasattr(layer, 'layers'):  # Das ist das InceptionV3 Model
-            # Entfiere alle Layers ab Layer 200 (mehr als vorher)
-            for sublayer in layer.layers[200:]:
+        if hasattr(layer, 'layers') and len(layer.layers) > config.UNFREEZE_FROM_LAYER:
+            base_model_found = True
+            print(f"✅ Base Model gefunden: {layer.name} mit {len(layer.layers)} Layers")
+
+            # Entfiere Layers ab bestimmtem Index
+            for sublayer in layer.layers[config.UNFREEZE_FROM_LAYER:]:
                 sublayer.trainable = True
-            print(f"✅ {len([l for l in layer.layers if l.trainable])} Layers des Base Models sind jetzt trainierbar")
+
+            trainable_layers = len([l for l in layer.layers if l.trainable])
+            print(f"✅ {trainable_layers} Layers des Base Models sind jetzt trainierbar")
             break
 
+    if not base_model_found:
+        print("⚠️ Kein Base Model mit genug Layers gefunden")
+
     # Zähle trainierbare Parameter
-    trainable_params = sum([tf.size(w).numpy() for w in model.trainable_weights])
-    print(f"   Neue trainierbare Parameters: {trainable_params:,}")
+    trainable_count = sum([tf.keras.backend.count_params(w) for w in model.trainable_weights])
+    print(f"   Neue trainierbare Parameter: {trainable_count:,}")
 
-# ============================================================
-# 5. Neu kompilieren mit angepasster Learning Rate
-# ============================================================
-print("\n⚙️ Kompiliere Modell mit neuer Learning Rate...")
 
-model.compile(
-    optimizer=Adam(learning_rate=LEARNING_RATE),
-    loss='categorical_crossentropy',
-    metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=2, name='top_2_accuracy')]
-)
+def setup_callbacks(config):
+    """Konfiguriere Training Callbacks"""
+    print("\n⚙️ Konfiguriere Callbacks...")
 
-print(f"✅ Learning Rate: {LEARNING_RATE}")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_dir = f"logs/fit/{timestamp}_resume"
 
-# ============================================================
-# 6. Callbacks
-# ============================================================
-print("\n⚙️ Konfiguriere Callbacks...")
+    callbacks = [
+        ModelCheckpoint(
+            config.RESUMED_BEST,
+            monitor='val_accuracy',
+            save_best_only=True,
+            mode='max',
+            verbose=1
+        ),
+        EarlyStopping(
+            monitor='val_loss',
+            patience=5,
+            restore_best_weights=True,
+            verbose=1
+        ),
+        ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=3,
+            min_lr=1e-7,
+            verbose=1
+        ),
+        TensorBoard(
+            log_dir=log_dir,
+            histogram_freq=1
+        )
+    ]
 
-timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-log_dir = f"logs/fit/{timestamp}_resume"
+    return callbacks, log_dir
 
-callbacks = [
-    ModelCheckpoint(
-        'models/resumed_best_model.keras',  # Neuer Name um Original nicht zu überschreiben
-        monitor='val_accuracy',
-        save_best_only=True,
-        mode='max',
-        verbose=1
-    ),
-    EarlyStopping(
-        monitor='val_loss',
-        patience=5,
-        restore_best_weights=True,
-        verbose=1
-    ),
-    ReduceLROnPlateau(
-        monitor='val_loss',
-        factor=0.5,
-        patience=3,
-        min_lr=1e-7,
-        verbose=1
-    ),
-    TensorBoard(
-        log_dir=log_dir,
-        histogram_freq=1
-    )
-]
 
-# ============================================================
-# 7. Evaluiere aktuelles Modell (vor Weitertraining)
-# ============================================================
-print("\n📊 Evaluiere aktuelles Modell (vor Weitertraining)...")
+def plot_training_history(history, save_path='training_history_resumed.png'):
+    """Visualisiere Trainingsverlauf"""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
-results_before = model.evaluate(validation_generator, verbose=0)
-print(f"   Aktuelle Val-Accuracy: {results_before[1] * 100:.2f}%")
-print(f"   Aktuelle Val-Loss: {results_before[0]:.4f}")
+    # Accuracy
+    axes[0, 0].plot(history.history['accuracy'], label='Training')
+    axes[0, 0].plot(history.history['val_accuracy'], label='Validation')
+    axes[0, 0].set_title('Model Accuracy')
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_ylabel('Accuracy')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True)
 
-# ============================================================
-# 8. Weitertrainieren!
-# ============================================================
-print(f"\n🏋️ Starte Weitertraining für {ADDITIONAL_EPOCHS} zusätzliche Epochen...")
-print("=" * 60)
+    # Loss
+    axes[0, 1].plot(history.history['loss'], label='Training')
+    axes[0, 1].plot(history.history['val_loss'], label='Validation')
+    axes[0, 1].set_title('Model Loss')
+    axes[0, 1].set_xlabel('Epoch')
+    axes[0, 1].set_ylabel('Loss')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True)
 
-history = model.fit(
-    train_generator,
-    epochs=ADDITIONAL_EPOCHS,
-    validation_data=validation_generator,
-    callbacks=callbacks,
-    class_weight=class_weights,
-    verbose=1
-)
+    # Top-2 Accuracy
+    if 'top_2_accuracy' in history.history:
+        axes[1, 0].plot(history.history['top_2_accuracy'], label='Training')
+        axes[1, 0].plot(history.history['val_top_2_accuracy'], label='Validation')
+        axes[1, 0].set_title('Top-2 Accuracy')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Top-2 Accuracy')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True)
 
-# ============================================================
-# 9. Evaluiere nach Weitertraining
-# ============================================================
-print("\n\n📊 Evaluiere nach Weitertraining...")
-print("=" * 60)
+    # Learning Rate
+    if 'lr' in history.history:
+        axes[1, 1].plot(history.history['lr'])
+        axes[1, 1].set_title('Learning Rate')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('LR')
+        axes[1, 1].set_yscale('log')
+        axes[1, 1].grid(True)
 
-# Lade bestes Modell
-best_model = tf.keras.models.load_model('models/resumed_best_model.keras')
-results_after = best_model.evaluate(validation_generator, verbose=1)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"\n📊 Trainingshistorie gespeichert: {save_path}")
+    plt.close()
 
-print("\n✅ Finale Metriken:")
-print(f"   Vorher: {results_before[1] * 100:.2f}%")
-print(f"   Nachher: {results_after[1] * 100:.2f}%")
-print(f"   Verbesserung: {(results_after[1] - results_before[1]) * 100:+.2f}%")
 
-# Speichere auch als finales Modell
-best_model.save('models/final_resumed_model.keras')
-print("\n💾 Modelle gespeichert:")
-print("   ✅ models/resumed_best_model.keras (bestes während Training)")
-print("   ✅ models/final_resumed_model.keras (finales Modell)")
+def save_training_summary(results_before, results_after, config, log_dir):
+    """Speichere Trainings-Zusammenfassung als JSON"""
+    summary = {
+        'timestamp': datetime.now().isoformat(),
+        'config': {
+            'additional_epochs': config.ADDITIONAL_EPOCHS,
+            'learning_rate': config.LEARNING_RATE,
+            'batch_size': config.BATCH_SIZE,
+            'unfreeze_from_layer': config.UNFREEZE_FROM_LAYER,
+        },
+        'results': {
+            'before': {
+                'accuracy': float(results_before[1]),
+                'loss': float(results_before[0]),
+            },
+            'after': {
+                'accuracy': float(results_after[1]),
+                'loss': float(results_after[0]),
+            },
+            'improvement': {
+                'accuracy': float(results_after[1] - results_before[1]),
+                'accuracy_percent': float((results_after[1] - results_before[1]) * 100),
+            }
+        },
+        'log_dir': log_dir
+    }
 
-print("\n🎉 Weitertraining abgeschlossen!")
-print("=" * 60)
-print(f"\n📊 TensorBoard starten mit: tensorboard --logdir={log_dir}")
-print("=" * 60)
+    summary_path = 'training_summary_resumed.json'
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+
+    print(f"\n💾 Trainings-Zusammenfassung gespeichert: {summary_path}")
+
+
+def main():
+    """Hauptfunktion für Resume Training"""
+    print("=" * 60)
+    print("🔄 Garbage Classification Model - Weitertrainieren")
+    print("=" * 60)
+
+    config = Config()
+
+    try:
+        # Setup
+        setup_gpu()
+        validate_directories(config)
+
+        # Lade Modell
+        print("\n" + "=" * 60)
+        print("📦 SCHRITT 1: Modell laden")
+        print("=" * 60)
+        model = load_model(config.MODEL_PATH)
+
+        # Daten vorbereiten
+        print("\n" + "=" * 60)
+        print("📊 SCHRITT 2: Daten vorbereiten")
+        print("=" * 60)
+        train_gen, val_gen = create_data_generators(config)
+        class_weights = calculate_class_weights(train_gen, config)
+
+        # Optional: Layers entfrieren
+        print("\n" + "=" * 60)
+        print("🔓 SCHRITT 3: Fine-Tuning konfigurieren")
+        print("=" * 60)
+        unfreeze_layers(model, config)
+
+        # Modell neu kompilieren
+        print("\n" + "=" * 60)
+        print("⚙️ SCHRITT 4: Modell kompilieren")
+        print("=" * 60)
+        model.compile(
+            optimizer=Adam(learning_rate=config.LEARNING_RATE),
+            loss='categorical_crossentropy',
+            metrics=[
+                'accuracy',
+                tf.keras.metrics.TopKCategoricalAccuracy(k=2, name='top_2_accuracy')
+            ]
+        )
+        print(f"✅ Learning Rate: {config.LEARNING_RATE}")
+
+        # Callbacks einrichten
+        callbacks, log_dir = setup_callbacks(config)
+
+        # Evaluiere vor Training
+        print("\n" + "=" * 60)
+        print("📊 SCHRITT 5: Evaluierung vor Training")
+        print("=" * 60)
+        results_before = model.evaluate(val_gen, verbose=0)
+        print(f"   Val-Accuracy: {results_before[1] * 100:.2f}%")
+        print(f"   Val-Loss: {results_before[0]:.4f}")
+
+        # Training
+        print("\n" + "=" * 60)
+        print(f"🏋️ SCHRITT 6: Weitertraining ({config.ADDITIONAL_EPOCHS} Epochen)")
+        print("=" * 60)
+
+        history = model.fit(
+            train_gen,
+            epochs=config.ADDITIONAL_EPOCHS,
+            validation_data=val_gen,
+            callbacks=callbacks,
+            class_weight=class_weights,
+            verbose=1
+        )
+
+        # Evaluiere nach Training
+        print("\n" + "=" * 60)
+        print("📊 SCHRITT 7: Finale Evaluierung")
+        print("=" * 60)
+
+        best_model = tf.keras.models.load_model(config.RESUMED_BEST)
+        results_after = best_model.evaluate(val_gen, verbose=1)
+
+        # Ergebnisse anzeigen
+        print("\n" + "=" * 60)
+        print("✅ FINALE METRIKEN")
+        print("=" * 60)
+        print(f"   Vorher:      {results_before[1] * 100:.2f}%")
+        print(f"   Nachher:     {results_after[1] * 100:.2f}%")
+        improvement = (results_after[1] - results_before[1]) * 100
+        print(f"   Verbesserung: {improvement:+.2f}%")
+
+        if improvement > 0:
+            print("\n🎉 Modell hat sich verbessert!")
+        elif improvement < -1:
+            print("\n⚠️ Modell hat sich verschlechtert - überprüfe Hyperparameter")
+        else:
+            print("\n📊 Keine signifikante Änderung")
+
+        # Speichere finales Modell
+        best_model.save(config.FINAL_RESUMED)
+        print("\n💾 Modelle gespeichert:")
+        print(f"   ✅ {config.RESUMED_BEST} (bestes während Training)")
+        print(f"   ✅ {config.FINAL_RESUMED} (finales Modell)")
+
+        # Visualisierung und Zusammenfassung
+        plot_training_history(history)
+        save_training_summary(results_before, results_after, config, log_dir)
+
+        print("\n" + "=" * 60)
+        print("🎉 Weitertraining erfolgreich abgeschlossen!")
+        print("=" * 60)
+        print(f"\n📊 TensorBoard starten mit:")
+        print(f"   tensorboard --logdir={log_dir}")
+        print("=" * 60)
+
+    except Exception as e:
+        print(f"\n❌ FEHLER: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
