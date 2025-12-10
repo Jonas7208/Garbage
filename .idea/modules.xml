@@ -2,6 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
+      <module fileurl="file://$PROJECT_DIR$/../PythonProject3/.idea/PythonProject3.iml" filepath="$PROJECT_DIR$/../PythonProject3/.idea/PythonProject3.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/garbage-classification-model.iml" filepath="$PROJECT_DIR$/.idea/garbage-classification-model.iml" />
     </modules>
   </component>
