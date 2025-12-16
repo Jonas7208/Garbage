@@ -16,9 +16,7 @@ FINE_TUNE_EPOCHS = 10
 LR = 0.0001
 TRAIN_DIR = 'dataset/train'
 
-def is_valid_file(filepath):
-    valid_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp')
-    return filepath.lower().endswith(valid_extensions)
+
 
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
