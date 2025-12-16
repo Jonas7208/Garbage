@@ -1,6 +1,6 @@
-tensorflow>=2.10.0
-keras>=2.10.0
-streamlit>=1.20.0
+tensorflow-macos==2.16.2
+tensorflow-metal==1.2.0
+numpy>=1.23.5,<2.0.0
 pillow>=9.0.0
-numpy>=1.23.0
-opencv-python>=4.7.0
+opencv-python==4.8.1.78
+streamlit>=1.20.0

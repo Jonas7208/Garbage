@@ -1,3 +1,7 @@
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
+os.environ["TF_NUM_INTEROP_THREADS"] = "1"
 import tensorflow as tf
 from tensorflow.keras.preprocessing import image
 import numpy as np
@@ -7,6 +11,8 @@ from datetime import datetime
 import json
 import sys
 from tqdm import tqdm
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
 
 class Config:
     """Zentrale Konfiguration"""

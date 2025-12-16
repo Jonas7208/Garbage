@@ -1,143 +1,115 @@
 import tensorflow as tf
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import InceptionV3
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization, Rescaling
 from tensorflow.keras.models import Model
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, TensorBoard
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l2
 import numpy as np
-from datetime import datetime
-from pathlib import Path
 import os
 
-print("=" * 60)
-print("🚀 Garbage Classification Model - Training")
-print("=" * 60)
-
-# ============================================================
-# KONFIGURATION
-# ============================================================
+# Config
 IMG_SIZE = (299, 299)
 BATCH_SIZE = 32
-INITIAL_EPOCHS = 20
+EPOCHS = 20
 FINE_TUNE_EPOCHS = 10
-LEARNING_RATE = 0.0001
+LR = 0.0001
 TRAIN_DIR = 'dataset/train'
-NUM_CLASSES = 6
 
-# ============================================================
-# GPU Setup
-# ============================================================
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-    try:
+def is_valid_file(filepath):
+    valid_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp')
+    return filepath.lower().endswith(valid_extensions)
+
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+try:
+    # Apple Metal GPU aktivieren
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        print(f"Metal GPU gefunden: {len(gpus)}")
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
-        print(f"✅ GPU gefunden: {len(gpus)} Gerät(e)")
-    except RuntimeError as e:
-        print(f"⚠️ GPU Setup Fehler: {e}")
-else:
-    print("⚠️ Keine GPU gefunden - Training auf CPU")
+    else:
+        print("Läuft auf CPU (kein Metal GPU gefunden)")
+except Exception as e:
+    print(f"GPU-Setup übersprungen: {e}")
 
-# ============================================================
-# Dataset Verzeichnis prüfen
-# ============================================================
+# Find dataset
 if not os.path.exists(TRAIN_DIR):
-    print(f"\n❌ FEHLER: '{TRAIN_DIR}' nicht gefunden!")
-    print("\n💡 Alternative Pfade:")
-    alternatives = ['dataset-resized/train', 'dataset', 'data/train']
-    for path in alternatives:
+    for path in ['dataset-resized/train', 'dataset', 'data/train']:
         if os.path.exists(path):
-            print(f"   ✅ {path} gefunden!")
             TRAIN_DIR = path
             break
-        else:
-            print(f"   ❌ {path}")
 
-    if not os.path.exists(TRAIN_DIR):
-        print("\n💡 Passe TRAIN_DIR im Code an!")
-        exit(1)
-
-print(f"✅ Dataset: {TRAIN_DIR}")
 os.makedirs('models', exist_ok=True)
-os.makedirs('logs/fit', exist_ok=True)
 
-# ============================================================
-# Daten-Generatoren
-# ============================================================
-print("\n📊 Erstelle Daten-Generatoren...")
-
-train_datagen = ImageDataGenerator(
-    rescale=1. / 255,
+# Load datasets using tf.keras.utils
+train_dataset = tf.keras.utils.image_dataset_from_directory(
+    TRAIN_DIR,
+    image_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    label_mode='categorical',
     validation_split=0.2,
-    rotation_range=30,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.2,
-    zoom_range=0.2,
-    horizontal_flip=True,
-    brightness_range=[0.8, 1.2],
-    fill_mode='nearest'
-)
-
-val_datagen = ImageDataGenerator(
-    rescale=1. / 255,
-    validation_split=0.2
-)
-
-train_generator = train_datagen.flow_from_directory(
-    TRAIN_DIR,
-    target_size=IMG_SIZE,
-    batch_size=BATCH_SIZE,
-    class_mode='categorical',
     subset='training',
-    shuffle=True
+    seed=123,
+    interpolation='bilinear'
 )
 
-validation_generator = val_datagen.flow_from_directory(
+validation_dataset = tf.keras.utils.image_dataset_from_directory(
     TRAIN_DIR,
-    target_size=IMG_SIZE,
+    image_size=IMG_SIZE,
     batch_size=BATCH_SIZE,
-    class_mode='categorical',
+    label_mode='categorical',
+    validation_split=0.2,
     subset='validation',
-    shuffle=False
+    seed=123,
+    interpolation='bilinear'
 )
 
-print(f"✅ Training: {train_generator.samples} Bilder")
-print(f"✅ Validation: {validation_generator.samples} Bilder")
-print(f"✅ Klassen: {list(train_generator.class_indices.keys())}")
+# Get class info BEFORE any transformations
+class_names = train_dataset.class_names
+NUM_CLASSES = len(class_names)
+print(f"\nClasses: {class_names}")
 
-# Passe NUM_CLASSES automatisch an
-NUM_CLASSES = len(train_generator.class_indices)
+# Data augmentation
+data_augmentation = tf.keras.Sequential([
+    tf.keras.layers.RandomFlip('horizontal'),
+    tf.keras.layers.RandomRotation(0.2),
+    tf.keras.layers.RandomZoom(0.2),
+    tf.keras.layers.RandomContrast(0.2)
+])
 
-# ============================================================
-# Class Weights
-# ============================================================
-print("\n⚖️ Berechne Class Weights...")
+# Apply augmentation with error handling
+def augment_and_validate(image, label):
+    try:
+        image = data_augmentation(image, training=True)
+        # Ensure valid range
+        image = tf.clip_by_value(image, 0.0, 255.0)
+    except:
+        pass  # Keep original if augmentation fails
+    return image, label
 
+train_dataset = train_dataset.map(augment_and_validate, num_parallel_calls=tf.data.AUTOTUNE)
+train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+validation_dataset = validation_dataset.prefetch(tf.data.AUTOTUNE)
+
+# Calculate class weights
 class_counts = np.zeros(NUM_CLASSES)
-for class_name, class_idx in train_generator.class_indices.items():
+for class_name in class_names:
     class_dir = os.path.join(TRAIN_DIR, class_name)
     if os.path.exists(class_dir):
         files = [f for f in os.listdir(class_dir)
                  if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        class_idx = class_names.index(class_name)
         class_counts[class_idx] = len(files)
 
 total = class_counts.sum()
 class_weights = {i: total / (NUM_CLASSES * count) if count > 0 else 1.0
                  for i, count in enumerate(class_counts)}
 
-print("Class Weights:")
-for name, idx in sorted(train_generator.class_indices.items(), key=lambda x: x[1]):
-    print(f"   {name}: {int(class_counts[idx])} Bilder (Weight: {class_weights[idx]:.2f})")
-
-# ============================================================
-# Modell erstellen
-# ============================================================
-print("\n📦 Erstelle Modell...")
-
-# Base Model
+# Build model
 base_model = InceptionV3(
     weights='imagenet',
     include_top=False,
@@ -145,9 +117,9 @@ base_model = InceptionV3(
 )
 base_model.trainable = False
 
-# Custom Top Layers
-# L2 reduziert da BatchNorm verwendet wird (siehe Paper: Faktor 5 reduzieren)
-x = base_model.output
+inputs = tf.keras.Input(shape=(*IMG_SIZE, 3))
+x = Rescaling(1./255)(inputs)
+x = base_model(x, training=False)
 x = GlobalAveragePooling2D()(x)
 x = Dense(1024, activation='relu', kernel_regularizer=l2(0.002))(x)
 x = BatchNormalization()(x)
@@ -155,131 +127,62 @@ x = Dropout(0.5)(x)
 x = Dense(512, activation='relu', kernel_regularizer=l2(0.002))(x)
 x = BatchNormalization()(x)
 x = Dropout(0.5)(x)
-predictions = Dense(NUM_CLASSES, activation='softmax', dtype='float32')(x)
+outputs = Dense(NUM_CLASSES, activation='softmax')(x)
 
-model = Model(inputs=base_model.input, outputs=predictions)
+model = Model(inputs, outputs)
 
-print(f"✅ Modell erstellt: {model.count_params():,} Parameter")
-
-# ============================================================
-# Callbacks
-# ============================================================
-print("\n⚙️ Konfiguriere Callbacks...")
-
-timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-log_dir = f"logs/fit/{timestamp}"
 
 callbacks = [
-    ModelCheckpoint(
-        'models/best_model.keras',
-        monitor='val_accuracy',
-        save_best_only=True,
-        mode='max',
-        verbose=1
-    ),
-    EarlyStopping(
-        monitor='val_loss',
-        patience=7,
-        restore_best_weights=True,
-        verbose=1
-    ),
-    ReduceLROnPlateau(
-        monitor='val_loss',
-        factor=0.5,
-        patience=3,
-        min_lr=1e-7,
-        verbose=1
-    ),
-    TensorBoard(log_dir=log_dir, histogram_freq=1)
+    ModelCheckpoint('models/best_model.keras', monitor='val_accuracy',
+                    save_best_only=True, mode='max', verbose=1),
+    EarlyStopping(monitor='val_loss', patience=7,
+                  restore_best_weights=True, verbose=1),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.5,
+                      patience=3, min_lr=1e-7, verbose=1)
 ]
 
-# ============================================================
-# PHASE 1: Initial Training
-# ============================================================
-print("\n" + "=" * 60)
-print("🏋️ PHASE 1: Training mit gefrorenem Base Model")
-print("=" * 60)
-
+print("\nPhase 1: Initial training")
 model.compile(
-    optimizer=Adam(learning_rate=LEARNING_RATE),
+    optimizer=Adam(learning_rate=LR),
     loss='categorical_crossentropy',
-    metrics=['accuracy',
-             tf.keras.metrics.TopKCategoricalAccuracy(k=2, name='top_2_accuracy')]
+    metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=2)]
 )
-
-print(f"Epochen: {INITIAL_EPOCHS}")
-print(f"Learning Rate: {LEARNING_RATE}")
 
 history1 = model.fit(
-    train_generator,
-    epochs=INITIAL_EPOCHS,
-    validation_data=validation_generator,
+    train_dataset,
+    epochs=EPOCHS,
+    validation_data=validation_dataset,
     callbacks=callbacks,
-    class_weight=class_weights,
-    verbose=1
+    class_weight=class_weights
 )
 
-# ============================================================
-# PHASE 2: Fine-Tuning
-# ============================================================
-print("\n" + "=" * 60)
-print("🔥 PHASE 2: Fine-Tuning")
-print("=" * 60)
-
-# Entfrier obere Layers
+print("\nPhase 2: Fine-tuning")
 base_model.trainable = True
 for layer in base_model.layers[:249]:
     layer.trainable = False
 
-trainable = len([l for l in base_model.layers if l.trainable])
-print(f"Trainierbare Layers: {trainable}/{len(base_model.layers)}")
-
-# Neu kompilieren mit niedriger LR
-fine_tune_lr = LEARNING_RATE / 10
 model.compile(
-    optimizer=Adam(learning_rate=fine_tune_lr),
+    optimizer=Adam(learning_rate=LR/10),
     loss='categorical_crossentropy',
-    metrics=['accuracy',
-             tf.keras.metrics.TopKCategoricalAccuracy(k=2, name='top_2_accuracy')]
+    metrics=['accuracy', tf.keras.metrics.TopKCategoricalAccuracy(k=2)]
 )
-
-print(f"Learning Rate: {fine_tune_lr}")
-
-initial_epoch = len(history1.history['loss'])
-total_epochs = initial_epoch + FINE_TUNE_EPOCHS
 
 history2 = model.fit(
-    train_generator,
-    epochs=total_epochs,
-    initial_epoch=initial_epoch,
-    validation_data=validation_generator,
+    train_dataset,
+    epochs=len(history1.history['loss']) + FINE_TUNE_EPOCHS,
+    initial_epoch=len(history1.history['loss']),
+    validation_data=validation_dataset,
     callbacks=callbacks,
-    class_weight=class_weights,
-    verbose=1
+    class_weight=class_weights
 )
 
-# ============================================================
-# Finale Evaluierung
-# ============================================================
-print("\n" + "=" * 60)
-print("📊 FINALE EVALUIERUNG")
-print("=" * 60)
-
+print("\nFinal evaluation")
 best_model = tf.keras.models.load_model('models/best_model.keras')
-results = best_model.evaluate(validation_generator, verbose=1)
+results = best_model.evaluate(validation_dataset, verbose=0)
 
-print("\n✅ FINALE METRIKEN:")
-print(f"   Loss:           {results[0]:.4f}")
-print(f"   Accuracy:       {results[1]:.4f} ({results[1] * 100:.2f}%)")
-print(f"   Top-2 Accuracy: {results[2]:.4f} ({results[2] * 100:.2f}%)")
+print(f"Loss: {results[0]:.4f}")
+print(f"Accuracy: {results[1]:.4f} ({results[1]*100:.2f}%)")
+print(f"Top-2 Accuracy: {results[2]:.4f} ({results[2]*100:.2f}%)")
 
-# Speichere finales Modell
 model.save('models/final_model.keras')
-print("\n💾 Modelle gespeichert:")
-print("   ✅ models/best_model.keras")
-print("   ✅ models/final_model.keras")
-
-print("\n🎉 Training abgeschlossen!")
-print("=" * 60)
-print(f"\n📊 TensorBoard: tensorboard --logdir={log_dir}")
-print("=" * 60)
+print("\nTraining complete")
