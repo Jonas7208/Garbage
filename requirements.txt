@@ -4,3 +4,6 @@ numpy>=1.23.5,<2.0.0
 pillow>=9.0.0
 opencv-python==4.8.1.78
 streamlit>=1.20.0
+plotly>=5.0
+matplotlib>=3.5
+tqdm>=4.0

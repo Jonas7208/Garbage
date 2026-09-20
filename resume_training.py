@@ -1,3 +1,4 @@
+from training_metrics import classification_metrics, save_validation_report
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, TensorBoard
@@ -22,7 +23,7 @@ class Config:
 
     # Neue Modellpfade
     RESUMED_BEST = 'models/resumed_best_model.keras'
-    FINAL_RESUMED = 'models/best_model.keras'
+    FINAL_RESUMED = 'models/final_resumed_model.keras'
 
     # Fine-Tuning Einstellungen
     UNFREEZE_FROM_LAYER = 200
@@ -199,14 +200,15 @@ def setup_callbacks(config):
     callbacks = [
         ModelCheckpoint(
             config.RESUMED_BEST,
-            monitor='val_accuracy',
+            monitor='val_macro_f1',
             save_best_only=True,
             mode='max',
             verbose=1
         ),
         EarlyStopping(
-            monitor='val_loss',
-            patience=5,
+            monitor='val_macro_f1',
+            mode='max',
+            patience=7,
             restore_best_weights=True,
             verbose=1
         ),
@@ -258,13 +260,13 @@ def plot_training_history(history, save_path='training_history_resumed.png'):
         axes[1, 0].legend()
         axes[1, 0].grid(True)
 
-    # Learning Rate
-    if 'lr' in history.history:
-        axes[1, 1].plot(history.history['lr'])
-        axes[1, 1].set_title('Learning Rate')
+    # Hauptmetrik für die Modellauswahl
+    if 'macro_f1' in history.history:
+        axes[1, 1].plot(history.history['macro_f1'], label='Training')
+        axes[1, 1].plot(history.history['val_macro_f1'], label='Validation')
+        axes[1, 1].set_title('Macro-F1')
         axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('LR')
-        axes[1, 1].set_yscale('log')
+        axes[1, 1].legend()
         axes[1, 1].grid(True)
 
     plt.tight_layout()
@@ -286,15 +288,18 @@ def save_training_summary(results_before, results_after, config, log_dir):
         'results': {
             'before': {
                 'accuracy': float(results_before[1]),
+                'macro_f1': float(results_before[3]),
                 'loss': float(results_before[0]),
             },
             'after': {
                 'accuracy': float(results_after[1]),
+                'macro_f1': float(results_after[3]),
                 'loss': float(results_after[0]),
             },
             'improvement': {
                 'accuracy': float(results_after[1] - results_before[1]),
                 'accuracy_percent': float((results_after[1] - results_before[1]) * 100),
+                'macro_f1': float(results_after[3] - results_before[3]),
             }
         },
         'log_dir': log_dir
@@ -346,10 +351,7 @@ def main():
         model.compile(
             optimizer=Adam(learning_rate=config.LEARNING_RATE),
             loss='categorical_crossentropy',
-            metrics=[
-                'accuracy',
-                tf.keras.metrics.TopKCategoricalAccuracy(k=2, name='top_2_accuracy')
-            ]
+            metrics=classification_metrics()
         )
         print(f"✅ Learning Rate: {config.LEARNING_RATE}")
 
@@ -392,12 +394,14 @@ def main():
         print("=" * 60)
         print(f"   Vorher:      {results_before[1] * 100:.2f}%")
         print(f"   Nachher:     {results_after[1] * 100:.2f}%")
-        improvement = (results_after[1] - results_before[1]) * 100
-        print(f"   Verbesserung: {improvement:+.2f}%")
+        print(f"   Macro-F1 vorher: {results_before[3]:.4f}")
+        print(f"   Macro-F1 nachher: {results_after[3]:.4f}")
+        improvement = (results_after[3] - results_before[3]) * 100
+        print(f"   Macro-F1 Änderung (Prozentpunkte): {improvement:+.2f}%")
 
         if improvement > 0:
             print("\n🎉 Modell hat sich verbessert!")
-        elif improvement < -1:
+        elif improvement < 0:
             print("\n⚠️ Modell hat sich verschlechtert - überprüfe Hyperparameter")
         else:
             print("\n📊 Keine signifikante Änderung")
@@ -411,6 +415,8 @@ def main():
         # Visualisierung und Zusammenfassung
         plot_training_history(history)
         save_training_summary(results_before, results_after, config, log_dir)
+        class_names = [name for name, index in sorted(val_gen.class_indices.items(), key=lambda item: item[1])]
+        save_validation_report(best_model, val_gen, class_names, Path(log_dir) / 'validation_report.json')
 
         print("\n" + "=" * 60)
         print("🎉 Weitertraining erfolgreich abgeschlossen!")

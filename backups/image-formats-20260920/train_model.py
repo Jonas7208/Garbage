@@ -32,38 +32,6 @@ try:
 except Exception as e:
     print(f"GPU-Setup übersprungen: {e}")
 
-def validate_training_images(directory):
-    from concurrent.futures import ThreadPoolExecutor
-    from pathlib import Path
-
-    files = sorted(path for path in Path(directory).rglob('*')
-                   if path.is_file() and path.suffix.lower() in
-                   {'.jpg', '.jpeg', '.png', '.bmp', '.gif'})
-    if not files:
-        raise ValueError(f"Keine Trainingsbilder gefunden: {directory}")
-    print(f"Prüfe {len(files)} Bilddateien vor dem Training ...", flush=True)
-
-    def check_image(path):
-        try:
-            with tf.device('/CPU:0'):
-                tf.io.decode_image(tf.io.read_file(str(path)), channels=3,
-                                   expand_animations=False).numpy()
-        except (tf.errors.OpError, OSError, ValueError) as exc:
-            return f"{path}: {str(exc).splitlines()[0]}"
-        return None
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        errors = [error for error in pool.map(check_image, files) if error]
-    if errors:
-        details = "\n".join(errors)
-        raise ValueError(
-            f"{len(errors)} Bilddatei(en) nicht lesbar. Training nicht gestartet.\n"
-            f"{details}\nBitte diese Dateien reparieren oder aus dem Trainingsordner entfernen.")
-    print(f"Bildprüfung erfolgreich: {len(files)} Dateien lesbar.", flush=True)
-
-
-validate_training_images(TRAIN_DIR)
-
 os.makedirs('models', exist_ok=True)
 os.makedirs('logs', exist_ok=True)
 

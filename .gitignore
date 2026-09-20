@@ -3,5 +3,4 @@ models/best_model.keras
 dataset/
 dataset/
 models/*.keras
-logs/
 models/*.keras

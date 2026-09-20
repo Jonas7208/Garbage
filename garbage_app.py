@@ -8,12 +8,10 @@ from datetime import datetime
 import time
 import json
 from pathlib import Path
+import hashlib
+from model_runtime import load_classifier, load_uploaded_classifier
 
-# ============================================================
-# KONFIGURATION
-# ============================================================
 
-# Seiten-Konfiguration
 st.set_page_config(
     page_title="♻️ AI Garbage Classifier",
     page_icon="♻️",
@@ -201,6 +199,8 @@ st.markdown("""
 # SESSION STATE
 # ============================================================
 
+if 'inference_times' not in st.session_state:
+    st.session_state.inference_times = []
 if 'prediction_history' not in st.session_state:
     st.session_state.prediction_history = []
 if 'total_classifications' not in st.session_state:
@@ -213,69 +213,41 @@ if 'total_co2_saved' not in st.session_state:
 # HILFSFUNKTIONEN
 # ============================================================
 
-@st.cache_resource
-def load_model():
-    """Lade das trainierte Modell mit Fehlerbehandlung"""
-    model_paths = [
-        'models/best_model.keras',
-        'best_model.keras',
-        '../models/best_model.keras',
-        '/Users/jonasgasparini/PycharmProjects/Garbage/models'
+def select_model():
+    source = st.radio("Modell auswählen", ["Vorhandenes Modell", "Modell hochladen"])
+    uploaded = None
+    path = None
+    if source == "Modell hochladen":
+        uploaded = st.file_uploader("Modelldatei", type=["keras", "tflite"], key="model_upload")
+        st.caption("Bis 200 MB. Die Datei wird für diese Sitzung geladen; vorhandene Modelle werden nicht überschrieben.")
+        if uploaded is None:
+            return None, None
+        content = uploaded.getvalue()
+        key = ("upload", hashlib.sha256(content).hexdigest())
+        label = uploaded.name
+    else:
+        folder = Path(__file__).resolve().parent / "models"
+        paths = sorted([*folder.glob("*.keras"), *folder.glob("*.tflite")])
+        if not paths:
+            st.info("Kein lokales Modell vorhanden. Bitte ein Modell hochladen.")
+            return None, None
+        path = st.selectbox("Gespeichertes Modell", paths, format_func=lambda p: p.name)
+        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        label = path.name
+    if st.session_state.get("active_model_key") != key:
+        st.session_state.pop("active_classifier", None)
+        st.session_state.pop("active_model_key", None)
+        try:
+            with st.spinner("Modell wird geladen und geprüft …"):
+                classifier = (load_uploaded_classifier(content, Path(label).suffix.lower())
+                              if uploaded is not None else load_classifier(path))
+            st.session_state.active_classifier = classifier
+            st.session_state.active_model_key = key
+        except Exception as exc:
+            st.error(f"Modell konnte nicht geladen werden: {exc}")
+            return None, None
+    return st.session_state.active_classifier, label
 
-    ]
-
-    for path in model_paths:
-        if Path(path).exists():
-            try:
-                st.success(f"✅ Modell geladen: {path}")
-                return model, path
-            except Exception as e:
-                st.warning(f"⚠️ Fehler beim Laden von {path}: {e}")
-
-    st.error("❌ Kein Modell gefunden!")
-    st.info(
-        "💡 Stelle sicher, dass ein trainiertes Modell existiert:\n- models/best_model.keras\n- models/final_model.keras")
-    return None, None
-
-
-@st.cache_data
-def load_model_info():
-    """Lade Modell-Informationen aus JSON falls vorhanden"""
-    try:
-        with open('models/training_summary.json', 'r') as f:
-            return json.load(f)
-    except:
-        return {
-            'results': {
-                'accuracy': 0.881,
-                'top_2_accuracy': 0.965
-            },
-            'data': {
-                'training_samples': 10438,
-                'num_classes': 6
-            }
-        }
-
-
-def preprocess_image(image):
-    """Bereite Bild für Vorhersage vor"""
-    # Resize zu 299x299 (InceptionV3 Input-Größe)
-    img = image.resize((299, 299))
-    img_array = np.array(img)
-
-    # Stelle sicher, dass es 3 Kanäle hat (RGB)
-    if len(img_array.shape) == 2:  # Grayscale
-        img_array = np.stack([img_array] * 3, axis=-1)
-    elif img_array.shape[2] == 4:  # RGBA
-        img_array = img_array[:, :, :3]
-
-    # Normalisiere auf [0, 1]
-    img_array = img_array.astype('float32') / 255.0
-
-    # Füge Batch-Dimension hinzu
-    img_array = np.expand_dims(img_array, axis=0)
-
-    return img_array
 
 
 def create_confidence_chart(predictions, class_names):
@@ -360,31 +332,22 @@ st.markdown('<div class="subtitle">🤖 Intelligente Müll-Klassifizierung mit D
 # ============================================================
 
 with st.sidebar:
-    st.markdown("## 📊 Modell-Informationen")
-
-    # Lade Modell-Info
-    model_info = load_model_info()
-
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        st.metric(
-            "Genauigkeit",
-            f"{model_info['results']['accuracy'] * 100:.1f}%",
-            delta="+0.6%"
-        )
-    with col_s2:
-        st.metric(
-            "Top-2 Acc.",
-            f"{model_info['results']['top_2_accuracy'] * 100:.1f}%",
-            delta="+2.1%"
-        )
-
-    st.metric(
-        "Trainingsbilder",
-        f"{model_info['data']['training_samples']:,}",
-        help="Anzahl der Bilder im Trainingsdatensatz"
-    )
-
+    st.markdown("## 🧠 Modell")
+    model, model_path = select_model()
+    scaling = "0–1"
+    classes_confirmed = False
+    if model is not None:
+        st.success(f"Geladen: {model_path}")
+        st.caption(f"Bildgröße: {model.image_size[0]} × {model.image_size[1]} · 6 Klassen")
+        options = ["0–1", "0–255", "−1–1"]
+        default = 1 if model.embedded_rescaling else 0
+        scaling = st.selectbox("Bildwerte wie beim Training", options, index=default,
+                               key=f"scaling_{st.session_state.active_model_key}",
+                               help="Eine Skalierung im Keras-Modell wird erkannt. Bei TFLite bitte den Wertebereich des Trainings auswählen.")
+        st.caption("Erforderliche Klassenreihenfolge: Karton, Glas, Metall, Papier, Plastik, Restmüll.")
+        classes_confirmed = st.checkbox("Mein Modell verwendet diese Klassenreihenfolge",
+                                        key=f"classes_{st.session_state.active_model_key}")
+        st.caption("Genauigkeit: nicht gemessen. Ein Modell-Upload enthält keinen unabhängigen Testbericht.")
     st.markdown("---")
 
     st.markdown("## 🗂️ Kategorien")
@@ -407,6 +370,7 @@ with st.sidebar:
 
     # Reset Button
     if st.button("🔄 Statistiken zurücksetzen"):
+        st.session_state.inference_times = []
         st.session_state.prediction_history = []
         st.session_state.total_classifications = 0
         st.session_state.total_co2_saved = 0.0
@@ -445,10 +409,12 @@ with tab1:
         st.markdown("### 🔍 Klassifizierung & Ergebnis")
 
         if uploaded_file is not None:
-            # Lade Modell
-            model, model_path = load_model()
+            if model is None:
+                st.info("Wähle in der Seitenleiste ein Modell aus oder lade eines hoch.")
+            elif not classes_confirmed:
+                st.info("Bestätige in der Seitenleiste die Klassenreihenfolge deines Modells.")
 
-            if model is not None:
+            if model is not None and classes_confirmed:
                 # Klassifiziere Button
                 if st.button('🚀 Jetzt klassifizieren!', type='primary', use_container_width=True):
 
@@ -461,15 +427,20 @@ with tab1:
                     progress_bar.progress(25)
                     time.sleep(0.3)
 
-                    processed_img = preprocess_image(image)
+                    processed_img = model.prepare_image(image, scaling)
 
                     # Schritt 2: Prediction
                     status_text.text('🤖 KI analysiert das Bild...')
                     progress_bar.progress(50)
 
                     start_time = time.time()
-                    predictions = model.predict(processed_img, verbose=0)
+                    try:
+                        predictions = model.predict(processed_img, verbose=0)
+                    except Exception as exc:
+                        st.error(f"Klassifikation fehlgeschlagen: {exc}")
+                        st.stop()
                     inference_time = time.time() - start_time
+                    st.session_state.inference_times.append(inference_time)
 
                     progress_bar.progress(75)
                     status_text.text('✨ Ergebnisse werden aufbereitet...')
@@ -616,9 +587,9 @@ with tab3:
         - Training: 2-phasig (Frozen → Fine-Tuning)
 
         **Performance:**
-        - Validation Accuracy: ~88%
-        - Top-2 Accuracy: ~96%
-        - Inferenz-Zeit: <0.5s pro Bild
+        - Accuracy und Macro-F1 werden im Training gemessen.
+        - Messwerte gehören immer zu einem bestimmten Modell und Datensplit.
+        - Die Inferenzzeit wird bei jeder Klassifikation gemessen.
         """)
 
     with col_info2:
@@ -675,10 +646,10 @@ with col_f1:
     )
 
 with col_f2:
-    avg_time = 0.5
+    avg_time = np.mean(st.session_state.inference_times) if st.session_state.inference_times else None
     st.metric(
         "⏱️ Ø Inferenz-Zeit",
-        f"{avg_time:.2f}s",
+        f"{avg_time:.2f}s" if avg_time is not None else "–",
         help="Durchschnittliche Zeit pro Klassifizierung"
     )
 
@@ -692,19 +663,6 @@ with col_f3:
 with col_f4:
     st.metric(
         "🎯 Modell-Genauigkeit",
-        "88.1%",
-        help="Validation Accuracy des Modells"
+        "Nicht gemessen",
+        help="Für das ausgewählte Modell liegt hier kein geprüfter Testbericht vor."
     )
-
-st.markdown("""
----
-<div style='text-align: center; color: gray; padding: 2rem 0;'>
-    <p>Made with ❤️ using <b>TensorFlow</b> & <b>Streamlit</b></p>
-    <p style='font-size: 0.9rem;'>
-        Model: InceptionV3 | Dataset: 13,044 Bilder | Framework: TensorFlow 2.x
-    </p>
-    <p style='font-size: 0.8rem; opacity: 0.7;'>
-        © 2024 AI Garbage Classifier | Für Bildungszwecke
-    </p>
-</div>
-""", unsafe_allow_html=True)
