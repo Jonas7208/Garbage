@@ -22,7 +22,7 @@ class Config:
 
     # Neue Modellpfade
     RESUMED_BEST = 'models/resumed_best_model.keras'
-    FINAL_RESUMED = 'models/final_resumed_model.keras'
+    FINAL_RESUMED = 'models/best_model.keras'
 
     # Fine-Tuning Einstellungen
     UNFREEZE_FROM_LAYER = 200

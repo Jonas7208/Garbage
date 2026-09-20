@@ -1,3 +1,4 @@
+
 import tensorflow as tf
 from tensorflow.keras.applications import InceptionV3
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout, BatchNormalization, Rescaling
@@ -105,10 +106,10 @@ x = base_model(x, training=False)
 x = GlobalAveragePooling2D()(x)
 x = Dense(1024, activation='relu', kernel_regularizer=l2(0.002))(x)
 x = BatchNormalization()(x)
-x = Dropout(0.5)(x)
-x = Dense(512, activation='relu', kernel_regularizer=l2(0.002))(x)
-x = BatchNormalization()(x)
-x = Dropout(0.5)(x)
+#x = Dropout(0.5)(x)
+#x = Dense(512, activation='relu', kernel_regularizer=l2(0.002))(x)
+#x = BatchNormalization()(x)
+
 outputs = Dense(num_classes, activation='softmax')(x)
 
 model = Model(inputs, outputs)

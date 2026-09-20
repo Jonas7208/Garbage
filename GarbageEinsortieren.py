@@ -17,7 +17,7 @@ tf.config.threading.set_inter_op_parallelism_threads(1)
 class Config:
     """Zentrale Konfiguration"""
     IMG_SIZE = (299, 299)
-    MODEL_PATH = 'models/best_model.keras'  # oder 'models/final_resumed_model.keras'
+    MODEL_PATH = 'models/best_model.keras'  # oder 'models/best_model.keras'
 
     # Ordnerstruktur
     INPUT_DIR = '/Users/jonasgasparini/Desktop/UnsortierteBilder'  # Hier neue Bilder hochladen

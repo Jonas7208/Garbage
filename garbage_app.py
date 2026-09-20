@@ -218,14 +218,15 @@ def load_model():
     """Lade das trainierte Modell mit Fehlerbehandlung"""
     model_paths = [
         'models/best_model.keras',
-        'models/final_model.keras',
-        '../models/best_model.keras'
+        'best_model.keras',
+        '../models/best_model.keras',
+        '/Users/jonasgasparini/PycharmProjects/Garbage/models'
+
     ]
 
     for path in model_paths:
         if Path(path).exists():
             try:
-                model = tf.keras.models.load_model(path)
                 st.success(f"✅ Modell geladen: {path}")
                 return model, path
             except Exception as e:
